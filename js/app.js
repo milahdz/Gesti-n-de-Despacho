@@ -444,6 +444,7 @@ async function registrarDespacho(solicitudId, itemsDespachados) {
     // await db.rpc('actualizar_stock', { p_producto_id: it.idproducto, p_cantidad: it.cantidad });
   }
   await db.from('solicitudes').update({ estado:'Despachada' }).eq('idsolicitud', solicitudId);
+  return { iddespacho: did, idsolicitud: solicitudId };
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -538,25 +539,14 @@ function renderFilas(solicitudes) {
         background:${pBg};color:${pCl}">${s.prioridad}</span></td>
       <td><span class="badge ${badgeClass(s.estado)}">${s.estado}</span></td>
       <td style="display:flex;gap:6px;align-items:center">
+        <button class="btn-secondary detalle-sol" data-id="${s.idsolicitud}"
+          style="padding:5px 10px;font-size:.8rem;color:#6366f1" title="Ver detalle y productos">
+          <i class="fas fa-list-ul"></i></button>
         ${isAdmin() ? `
-          <button class="btn-secondary aprobar-sol" data-id="${s.idsolicitud}"
-            style="padding:5px 10px;font-size:.8rem;color:#3b82f6" title="Cambiar estado">
-            <i class="fas fa-tasks"></i></button>
-          <button class="btn-secondary editar-sol" data-id="${s.idsolicitud}"
-            style="padding:5px 10px;font-size:.8rem" title="Editar">
-            <i class="fas fa-edit"></i></button>
           <button class="btn-secondary eliminar-sol" data-id="${s.idsolicitud}"
             style="padding:5px 10px;font-size:.8rem;color:#ef4444" title="Eliminar">
             <i class="fas fa-trash"></i></button>
-        ` : isAlmacen() ? `
-          <button class="btn-secondary ver-sol" data-id="${s.idsolicitud}"
-            style="padding:5px 10px;font-size:.8rem;color:#64748b" title="Ver detalle">
-            <i class="fas fa-eye"></i></button>
-        ` : `
-          <button class="btn-secondary editar-sol" data-id="${s.idsolicitud}"
-            style="padding:5px 10px;font-size:.8rem" title="Editar">
-            <i class="fas fa-edit"></i></button>
-        `}
+        ` : ''}
       </td></tr>`;
   }
   const tbody = document.querySelector('.sol-table tbody');
@@ -572,43 +562,7 @@ function bindSolicitudesEvents() {
     }));
 
   document.querySelectorAll('.aprobar-sol').forEach(btn =>
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.id;
-      // Mini modal de cambio de estado
-      document.getElementById('formModal')?.remove();
-      const m = document.createElement('div');
-      m.id = 'formModal';
-      m.style.cssText = `position:fixed;inset:0;z-index:2000;background:rgba(15,23,42,.55);
-        display:flex;align-items:center;justify-content:center;padding:20px`;
-      m.innerHTML = `
-        <div style="background:white;border-radius:20px;padding:28px;width:100%;max-width:360px;box-shadow:0 20px 40px rgba(0,0,0,.15)">
-          <h3 style="margin-bottom:16px;font-size:1rem;font-weight:700">Cambiar estado — Solicitud #${id}</h3>
-          <div style="display:flex;flex-direction:column;gap:10px">
-            ${['Pendiente','Aprobada','Rechazada','Despachada'].map(e => `
-              <button class="cambiar-estado-btn" data-estado="${e}"
-                style="padding:12px;border-radius:12px;border:2px solid #e2e8f0;
-                background:white;cursor:pointer;font-weight:600;font-size:.9rem;text-align:left;
-                display:flex;align-items:center;gap:10px;transition:.15s">
-                <span class="badge ${badgeClass(e)}">${e}</span>
-              </button>`).join('')}
-          </div>
-          <button id="closeEstadoModal" style="width:100%;margin-top:16px;padding:10px;border:none;
-            border-radius:10px;background:#f1f5f9;cursor:pointer;font-weight:500">Cancelar</button>
-        </div>`;
-      document.body.appendChild(m);
-      document.getElementById('closeEstadoModal').addEventListener('click', () => m.remove());
-      m.addEventListener('click', e => { if (e.target === m) m.remove(); });
-      m.querySelectorAll('.cambiar-estado-btn').forEach(b => {
-        b.addEventListener('mouseenter', () => b.style.borderColor = '#3b82f6');
-        b.addEventListener('mouseleave', () => b.style.borderColor = '#e2e8f0');
-        b.addEventListener('click', async () => {
-          const { error } = await db.from('solicitudes').update({ estado: b.dataset.estado }).eq('idsolicitud', id);
-          m.remove();
-          if (error) showToast('Error al actualizar', 'error');
-          else { showToast('Estado actualizado'); renderSolicitudes(); }
-        });
-      });
-    }));
+    btn.addEventListener('click', () => abrirModalCambioEstado(btn.dataset.id)));
 
   document.querySelectorAll('.eliminar-sol').forEach(btn =>
     btn.addEventListener('click', () =>
@@ -618,6 +572,261 @@ function bindSolicitudesEvents() {
         if (error) showToast('Error al eliminar','error');
         else { showToast('Eliminada','warning'); renderSolicitudes(); }
       })));
+
+  document.querySelectorAll('.detalle-sol').forEach(btn =>
+    btn.addEventListener('click', () => verDetalleSolicitud(btn.dataset.id)));
+}
+
+// ── Modal de detalle de productos de una solicitud ────────────────
+async function verDetalleSolicitud(solicitudId) {
+  // Traer cabecera de solicitud
+  const { data: sol } = await db.from('solicitudes')
+    .select('idsolicitud, estado, prioridad, fechasolicitud, comentarios, idusuario')
+    .eq('idsolicitud', solicitudId)
+    .single();
+
+  // Traer usuario/departamento
+  let solicitante = 'N/A', departamento = 'N/A';
+  if (sol?.idusuario) {
+    const { data: usr } = await db.from('usuarios')
+      .select('nombre, iddepartamento, departamentos(nombre)')
+      .eq('idusuario', sol.idusuario)
+      .single();
+    solicitante  = usr?.nombre ?? 'N/A';
+    // departamentos puede venir como join o no
+    departamento = usr?.departamentos?.nombre ?? 'N/A';
+    if (departamento === 'N/A' && usr?.iddepartamento) {
+      const { data: dep } = await db.from('departamentos')
+        .select('nombre').eq('iddepartamento', usr.iddepartamento).single();
+      departamento = dep?.nombre ?? 'N/A';
+    }
+  }
+
+  // Traer detalle de productos
+  const { data: items } = await db.from('solicituddetalle')
+    .select('cantidad, idproducto')
+    .eq('idsolicitud', solicitudId);
+
+  let productosHTML = '';
+  if (items?.length) {
+    // Traer nombres de productos
+    const ids = items.map(i => i.idproducto);
+    const { data: prods } = await db.from('productos')
+      .select('idproducto, nombre, descripcion, stockactual')
+      .in('idproducto', ids);
+    const prodMap = {};
+    (prods ?? []).forEach(p => { prodMap[p.idproducto] = p; });
+
+    const totalItems = items.reduce((acc, i) => acc + (i.cantidad ?? 0), 0);
+
+    productosHTML = `
+      <div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:.78rem;font-weight:700;color:#64748b;text-transform:uppercase;
+          letter-spacing:.05em">${items.length} producto${items.length!==1?'s':''} · ${totalItems} unidades totales</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${items.map((it, idx) => {
+          const p  = prodMap[it.idproducto] ?? {};
+          const cr = (p.stockactual ?? 0) < (it.cantidad ?? 0);
+          return `
+            <div style="display:grid;grid-template-columns:28px 1fr auto;gap:10px;align-items:center;
+              padding:12px 14px;border-radius:12px;background:#f8fafc;border:1.5px solid #e2e8f0">
+              <div style="width:28px;height:28px;border-radius:8px;background:#e0e7ff;
+                display:flex;align-items:center;justify-content:center;
+                font-size:.75rem;font-weight:700;color:#4f46e5">${idx+1}</div>
+              <div>
+                <div style="font-weight:600;font-size:.9rem;color:#0f172a">${p.nombre ?? 'Producto #'+it.idproducto}</div>
+                ${p.descripcion ? `<div style="font-size:.73rem;color:#94a3b8;margin-top:1px">${p.descripcion}</div>` : ''}
+                <div style="font-size:.72rem;margin-top:3px;color:${cr?'#ef4444':'#64748b'}">
+                  <i class="fas fa-boxes" style="margin-right:3px"></i>
+                  Stock disponible: <strong>${p.stockactual ?? 'N/A'}</strong>
+                  ${cr ? ' <span style="color:#ef4444;font-weight:700">⚠ Insuficiente</span>' : ''}
+                </div>
+              </div>
+              <div style="text-align:center;min-width:60px">
+                <div style="font-size:1.3rem;font-weight:800;color:#0f172a">${it.cantidad}</div>
+                <div style="font-size:.68rem;color:#94a3b8">unidades</div>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+      ${sol?.comentarios ? `
+        <div style="margin-top:14px;padding:10px 14px;background:#fffbeb;border-radius:10px;
+          border:1px solid #fde68a;font-size:.83rem;color:#92400e">
+          <i class="fas fa-comment-alt" style="margin-right:6px"></i>
+          <strong>Comentario:</strong> ${sol.comentarios}
+        </div>` : ''}`;
+  } else {
+    productosHTML = `<p style="color:#94a3b8;text-align:center;padding:24px 0;font-size:.9rem">
+      Sin productos registrados en esta solicitud.</p>`;
+  }
+
+  // Colores de estado y prioridad
+  const estColores = {
+    Pendiente:  ['#fffbeb','#b45309','#fef3c7'],
+    Aprobada:   ['#f0fdf4','#15803d','#dcfce7'],
+    Rechazada:  ['#fef2f2','#b91c1c','#fee2e2'],
+    Despachada: ['#eff6ff','#1d4ed8','#dbeafe'],
+  };
+  const [eBg, eCl] = estColores[sol?.estado] ?? ['#f1f5f9','#475569'];
+  const pColores = { Alta:['#fef2f2','#b91c1c'], Media:['#fffbeb','#b45309'], Baja:['#f0fdf4','#15803d'] };
+  const [pBg, pCl] = pColores[sol?.prioridad] ?? ['#f1f5f9','#475569'];
+
+  // Construir y abrir modal
+  document.getElementById('formModal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'formModal';
+  m.style.cssText = `position:fixed;inset:0;z-index:2000;background:rgba(15,23,42,.55);
+    display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .2s ease`;
+  m.innerHTML = `
+    <div style="background:white;border-radius:24px;width:100%;max-width:560px;
+      box-shadow:0 25px 50px rgba(0,0,0,.18);animation:slideUp .25s ease;overflow:hidden">
+
+      <!-- Cabecera del modal -->
+      <div style="padding:20px 24px;border-bottom:1px solid #f1f5f9;
+        display:flex;align-items:center;justify-content:space-between">
+        <div style="display:flex;align-items:center;gap:12px">
+          <div style="width:40px;height:40px;border-radius:12px;background:#e0e7ff;
+            display:flex;align-items:center;justify-content:center">
+            <i class="fas fa-file-alt" style="color:#4f46e5;font-size:1rem"></i>
+          </div>
+          <div>
+            <h3 style="font-size:1rem;font-weight:700;color:#0f172a">Solicitud #${solicitudId}</h3>
+            <p style="font-size:.75rem;color:#94a3b8;margin-top:1px">
+              ${new Date(sol?.fechasolicitud).toLocaleDateString('es-DO', {day:'2-digit',month:'long',year:'numeric'})}
+            </p>
+          </div>
+        </div>
+        <button id="closeDetalle" style="background:none;border:none;font-size:1.4rem;
+          color:#94a3b8;cursor:pointer;line-height:1">&times;</button>
+      </div>
+
+      <!-- Info solicitante -->
+      <div style="padding:16px 24px;background:#f8fafc;border-bottom:1px solid #f1f5f9;
+        display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+        <div>
+          <div style="font-size:.68rem;color:#94a3b8;font-weight:600;text-transform:uppercase;
+            letter-spacing:.05em;margin-bottom:3px">Solicitante</div>
+          <div style="font-weight:600;font-size:.85rem;color:#0f172a">${solicitante}</div>
+        </div>
+        <div>
+          <div style="font-size:.68rem;color:#94a3b8;font-weight:600;text-transform:uppercase;
+            letter-spacing:.05em;margin-bottom:3px">Departamento</div>
+          <div style="font-weight:600;font-size:.85rem;color:#0f172a">${departamento}</div>
+        </div>
+        <div>
+          <div style="font-size:.68rem;color:#94a3b8;font-weight:600;text-transform:uppercase;
+            letter-spacing:.05em;margin-bottom:3px">Prioridad</div>
+          <span style="font-size:.78rem;font-weight:700;padding:3px 10px;border-radius:20px;
+            background:${pBg};color:${pCl}">${sol?.prioridad ?? '—'}</span>
+        </div>
+      </div>
+
+      <!-- Estado -->
+      <div style="padding:12px 24px;border-bottom:1px solid #f1f5f9;
+        display:flex;align-items:center;gap:10px">
+        <span style="font-size:.78rem;color:#64748b;font-weight:500">Estado actual:</span>
+        <span style="font-size:.82rem;font-weight:700;padding:4px 12px;border-radius:20px;
+          background:${eBg};color:${eCl}">${sol?.estado ?? '—'}</span>
+        ${isAdmin() ? `<button class="aprobar-sol" data-id="${solicitudId}"
+          style="margin-left:auto;padding:5px 12px;font-size:.78rem;border:1.5px solid #3b82f6;
+          border-radius:20px;background:white;color:#3b82f6;cursor:pointer;font-weight:600">
+          <i class="fas fa-tasks" style="margin-right:4px"></i>Cambiar estado</button>` : ''}
+      </div>
+
+      <!-- Lista de productos -->
+      <div style="padding:20px 24px;max-height:50vh;overflow-y:auto">
+        <div style="font-size:.78rem;font-weight:700;color:#475569;text-transform:uppercase;
+          letter-spacing:.05em;margin-bottom:12px">
+          <i class="fas fa-boxes" style="margin-right:6px;color:#6366f1"></i>Productos solicitados
+        </div>
+        ${productosHTML}
+      </div>
+
+      <!-- Footer -->
+      <div style="padding:14px 24px;border-top:1px solid #f1f5f9;display:flex;justify-content:flex-end;gap:10px">
+        ${isAdmin() ? `
+          <button class="aprobar-sol" data-id="${solicitudId}"
+            style="padding:8px 18px;background:#3b82f6;color:white;border:none;
+            border-radius:10px;cursor:pointer;font-weight:600;font-size:.85rem">
+            <i class="fas fa-tasks" style="margin-right:6px"></i>Cambiar Estado
+          </button>` : ''}
+        <button id="cerrarDetalle" style="padding:8px 18px;background:#f1f5f9;color:#475569;
+          border:none;border-radius:10px;cursor:pointer;font-weight:600;font-size:.85rem">
+          Cerrar
+        </button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(m);
+  document.getElementById('closeDetalle').addEventListener('click', () => m.remove());
+  document.getElementById('cerrarDetalle').addEventListener('click', () => m.remove());
+  m.addEventListener('click', e => { if (e.target === m) m.remove(); });
+
+  // Botones "Cambiar estado" dentro del modal de detalle
+  m.querySelectorAll('.aprobar-sol').forEach(btn =>
+    btn.addEventListener('click', () => {
+      m.remove();
+      abrirModalCambioEstado(solicitudId);
+    }));
+}
+
+// ── Mini-modal de cambio de estado (reutilizable) ─────────────────
+function abrirModalCambioEstado(solicitudId) {
+  document.getElementById('formModal')?.remove();
+  const cm = document.createElement('div');
+  cm.id = 'formModal';
+  cm.style.cssText = `position:fixed;inset:0;z-index:2000;background:rgba(15,23,42,.55);
+    display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .2s ease`;
+  cm.innerHTML = `
+    <div style="background:white;border-radius:20px;padding:28px;width:100%;max-width:360px;
+      box-shadow:0 20px 40px rgba(0,0,0,.15);animation:slideUp .2s ease">
+      <h3 style="margin-bottom:6px;font-size:1rem;font-weight:700;color:#0f172a">
+        Cambiar estado
+      </h3>
+      <p style="font-size:.8rem;color:#94a3b8;margin-bottom:18px">Solicitud #${solicitudId}</p>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${['Pendiente','Aprobada','Rechazada','Despachada'].map(e => {
+          const colores = {
+            Pendiente:  ['#fffbeb','#b45309','#fef3c7'],
+            Aprobada:   ['#f0fdf4','#15803d','#dcfce7'],
+            Rechazada:  ['#fef2f2','#b91c1c','#fee2e2'],
+            Despachada: ['#eff6ff','#1d4ed8','#dbeafe'],
+          };
+          const [bg, cl, border] = colores[e] ?? ['#f8fafc','#475569','#e2e8f0'];
+          return `<button class="cambiar-estado-btn" data-estado="${e}"
+            style="padding:12px 16px;border-radius:12px;border:2px solid ${border};
+            background:${bg};cursor:pointer;font-weight:600;font-size:.9rem;
+            display:flex;align-items:center;gap:10px;transition:.15s;color:${cl}">
+            <span style="width:8px;height:8px;border-radius:50%;background:${cl};flex-shrink:0"></span>
+            ${e}
+          </button>`;
+        }).join('')}
+      </div>
+      <button id="closeCambioEstado" style="width:100%;margin-top:14px;padding:10px;border:none;
+        border-radius:10px;background:#f1f5f9;cursor:pointer;font-weight:500;color:#475569">
+        Cancelar
+      </button>
+    </div>`;
+  document.body.appendChild(cm);
+
+  document.getElementById('closeCambioEstado').addEventListener('click', () => cm.remove());
+  cm.addEventListener('click', e => { if (e.target === cm) cm.remove(); });
+
+  cm.querySelectorAll('.cambiar-estado-btn').forEach(b => {
+    b.addEventListener('mouseenter', () => b.style.transform = 'translateX(4px)');
+    b.addEventListener('mouseleave', () => b.style.transform = '');
+    b.addEventListener('click', async () => {
+      b.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...';
+      b.disabled = true;
+      const { error } = await db.from('solicitudes')
+        .update({ estado: b.dataset.estado })
+        .eq('idsolicitud', solicitudId);
+      cm.remove();
+      if (error) showToast('Error al actualizar estado', 'error');
+      else { showToast(`Estado cambiado a "${b.dataset.estado}"`); renderSolicitudes(); }
+    });
+  });
 }
 
 async function renderSolicitudes() {
@@ -653,8 +862,13 @@ async function renderSolicitudes() {
           <h2 style="font-size:1.5rem;font-weight:700;color:#0f172a">Solicitudes de Insumos</h2>
           <p style="color:#64748b;font-size:.85rem;margin-top:2px">Gestiona todas las solicitudes de materiales</p>
         </div>
-        ${!isAlmacen() ? `<button id="nuevaSolBtn" class="btn-primary" style="padding:10px 20px">
-          <i class="fas fa-plus"></i> Nueva Solicitud</button>` : ''}
+        <div style="display:flex;gap:10px">
+          <button id="exportarSolBtn" class="btn-secondary" style="padding:10px 18px">
+            <i class="fas fa-file-excel"></i> Exportar Excel
+          </button>
+          ${!isAlmacen() ? `<button id="nuevaSolBtn" class="btn-primary" style="padding:10px 20px">
+            <i class="fas fa-plus"></i> Nueva Solicitud</button>` : ''}
+        </div>
       </div>
 
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
@@ -684,6 +898,7 @@ async function renderSolicitudes() {
 
     renderFilas(solicitudes);
 
+    document.getElementById('exportarSolBtn')?.addEventListener('click', () => exportarSolicitudes());
     document.getElementById('nuevaSolBtn')?.addEventListener('click', () => abrirFormSolicitud());
 
     // Mini stats como filtros clickeables
@@ -964,10 +1179,15 @@ async function renderInventario() {
           <h2 style="font-size:1.5rem;font-weight:700;color:#0f172a">Gestión de Inventario</h2>
           <p style="color:#64748b;font-size:.85rem;margin-top:2px">Control y seguimiento de productos en almacén</p>
         </div>
-        ${soloAdmin ? `<button id="nuevoProductoBtn" class="btn-primary" style="padding:10px 20px">
-          <i class="fas fa-plus"></i> Agregar Producto</button>` : `
-          <span style="background:#f1f5f9;color:#64748b;padding:8px 16px;border-radius:40px;
-            font-size:.82rem;font-weight:600"><i class="fas fa-eye" style="margin-right:6px"></i>Modo visualización</span>`}
+        <div style="display:flex;gap:10px;align-items:center">
+          <button id="exportarInvBtn" class="btn-secondary" style="padding:10px 18px">
+            <i class="fas fa-file-excel"></i> Exportar Excel
+          </button>
+          ${soloAdmin ? `<button id="nuevoProductoBtn" class="btn-primary" style="padding:10px 20px">
+            <i class="fas fa-plus"></i> Agregar Producto</button>` : `
+            <span style="background:#f1f5f9;color:#64748b;padding:8px 16px;border-radius:40px;
+              font-size:.82rem;font-weight:600"><i class="fas fa-eye" style="margin-right:6px"></i>Modo visualización</span>`}
+        </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px">${invStats}</div>
       <div style="background:white;border-radius:20px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.05)">
@@ -983,6 +1203,8 @@ async function renderInventario() {
           <tbody id="inv-tbody">${rows||'<tr><td colspan="6" style="text-align:center;color:#64748b;padding:32px">Sin productos</td></tr>'}</tbody>
         </table>
       </div>`;
+
+    document.getElementById('exportarInvBtn')?.addEventListener('click', () => exportarInventario());
 
     // Buscador en tiempo real
     document.getElementById('buscar-prod')?.addEventListener('input', e => {
@@ -1107,6 +1329,10 @@ async function renderDespacho() {
             <button class="btn-primary despachar-btn" data-id="${s.idsolicitud}"
               style="width:100%;padding:10px">
               <i class="fas fa-truck"></i> Confirmar Despacho
+            </button>` : isAlmacen() ? `
+            <button class="btn-secondary imprimir-sol-btn" data-id="${s.idsolicitud}"
+              style="width:100%;padding:9px;font-size:.85rem">
+              <i class="fas fa-print"></i> Ver Comprobante
             </button>` : `
             <div style="text-align:center;padding:8px;background:#f1f5f9;border-radius:8px;
               font-size:.8rem;color:#64748b;font-weight:500">
@@ -1139,15 +1365,28 @@ async function renderDespacho() {
         </div>
       </div>`;
 
+    // Botón comprobante para Almacén (solo lectura)
+    document.querySelectorAll('.imprimir-sol-btn').forEach(btn =>
+      btn.addEventListener('click', () => imprimirComprobanteSolicitud(btn.dataset.id)));
+
     if (soloAdmin) {
       document.querySelectorAll('.despachar-btn').forEach(btn =>
         btn.addEventListener('click', () =>
           showModal('Confirmar Despacho', `¿Registrar despacho para solicitud #${btn.dataset.id}?`, async () => {
             showLoader(true);
             try {
-              await registrarDespacho(btn.dataset.id, []);
+              const resultado = await registrarDespacho(btn.dataset.id, []);
               showToast('Despacho registrado correctamente');
               renderDespacho();
+              // Ofrecer imprimir comprobante
+              setTimeout(() => {
+                const sid = btn.dataset.id;
+                showModal(
+                  '¿Imprimir comprobante?',
+                  `El despacho #${resultado?.iddespacho ?? '—'} fue registrado. ¿Deseas imprimir el comprobante?`,
+                  () => imprimirComprobanteDespacho(resultado?.iddespacho, sid)
+                );
+              }, 400);
             } catch(e) { showToast('Error al despachar','error'); }
             finally    { showLoader(false); }
           })));
@@ -1243,8 +1482,13 @@ async function renderUsuarios() {
           <h2 style="font-size:1.5rem;font-weight:700;color:#0f172a">Gestión de Usuarios</h2>
           <p style="color:#64748b;font-size:.85rem;margin-top:2px">Administra usuarios y permisos del sistema</p>
         </div>
-        <button id="nuevoUsrBtn" class="btn-primary" style="padding:10px 20px">
-          <i class="fas fa-user-plus"></i> Nuevo Usuario</button>
+        <div style="display:flex;gap:10px">
+          <button id="exportarUsrBtn" class="btn-secondary" style="padding:10px 18px">
+            <i class="fas fa-file-excel"></i> Exportar Excel
+          </button>
+          <button id="nuevoUsrBtn" class="btn-primary" style="padding:10px 20px">
+            <i class="fas fa-user-plus"></i> Nuevo Usuario</button>
+        </div>
       </div>
       <div class="stats-grid" style="margin-bottom:20px">${rolStats}</div>
       <div style="background:white;border-radius:20px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.05)">
@@ -1274,6 +1518,8 @@ async function renderUsuarios() {
       });
     });
 
+    document.getElementById('exportarUsrBtn')?.addEventListener('click', () => exportarUsuarios());
+    document.getElementById('nuevoUsrBtn').addEventListener('click', () => abrirFormUsuario());
     bindUsrEvents();
   } catch(e) { console.error(e); showError('Error cargando usuarios.'); }
   finally    { showLoader(false); }
@@ -1395,6 +1641,608 @@ async function abrirFormUsuario(u = null) {
       });
     });
   }, 50);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+//  EXPORTACIÓN Y COMPROBANTE
+// ══════════════════════════════════════════════════════════════════
+
+// ── Exportar tabla a CSV ─────────────────────────────────────────
+// ── Carga de SheetJS (versión que soporta estilos via sheetjs-style) ──
+function cargarSheetJS() {
+  return new Promise((resolve, reject) => {
+    if (window.XLSX) { resolve(window.XLSX); return; }
+    // Usamos xlsx-style que soporta la propiedad .s para estilos
+    const s = document.createElement('script');
+    s.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+    s.onload  = () => {
+      if (window.XLSX) resolve(window.XLSX);
+      else reject(new Error('XLSX no disponible tras carga'));
+    };
+    s.onerror = () => {
+      // Fallback al CDN de cloudflare si el primero falla
+      const s2 = document.createElement('script');
+      s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+      s2.onload  = () => resolve(window.XLSX);
+      s2.onerror = () => reject(new Error('No se pudo cargar SheetJS'));
+      document.head.appendChild(s2);
+    };
+    document.head.appendChild(s);
+  });
+}
+
+// ── Exportar a Excel (.xlsx) ──────────────────────────────────────
+// Nota: los estilos (.s) solo funcionan con xlsx-style o xlsx >= 0.20
+// Si no están disponibles, el archivo igual se genera sin estilos.
+async function exportarExcel(datos, nombreArchivo, titulo = '') {
+  if (!datos.length) { showToast('No hay datos para exportar', 'warning'); return; }
+
+  let XLSX;
+  try {
+    XLSX = await cargarSheetJS();
+  } catch(e) {
+    showToast('Error cargando librería de Excel: ' + e.message, 'error');
+    console.error(e);
+    return;
+  }
+
+  try {
+    const encabezados = Object.keys(datos[0]);
+    const filas       = datos.map(fila => encabezados.map(k => {
+      const v = fila[k];
+      // Mantener números como números para que Excel los reconozca
+      if (typeof v === 'number') return v;
+      return String(v ?? '');
+    }));
+
+    // Estructura: fila título, fila vacía, encabezados, datos
+    const wsData = [
+      [titulo || nombreArchivo.toUpperCase()],
+      [],
+      encabezados,
+      ...filas
+    ];
+
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+    // Anchos de columna automáticos
+    ws['!cols'] = encabezados.map((h, ci) => ({
+      wch: Math.min(50, Math.max(
+        h.length + 2,
+        ...filas.map(f => String(f[ci] ?? '').length)
+      ) + 3)
+    }));
+
+    // Merge del título en fila 1
+    ws['!merges'] = [{ s:{ r:0, c:0 }, e:{ r:0, c: encabezados.length - 1 } }];
+
+    // Altura de filas: título más alto
+    ws['!rows'] = [{ hpt:28 }, { hpt:6 }, { hpt:20 }];
+
+    // Aplicar estilos solo si la versión de XLSX lo soporta
+    const aplicarEstilo = (cellAddr, estilo) => {
+      if (ws[cellAddr]) ws[cellAddr].s = estilo;
+    };
+
+    // Estilo título
+    aplicarEstilo(XLSX.utils.encode_cell({ r:0, c:0 }), {
+      font:      { bold:true, sz:13, color:{ rgb:'FFFFFF' } },
+      fill:      { patternType:'solid', fgColor:{ rgb:'1E3A5F' } },
+      alignment: { horizontal:'center', vertical:'center', wrapText:true },
+    });
+
+    // Estilo encabezados (fila índice 2)
+    encabezados.forEach((_, ci) => {
+      aplicarEstilo(XLSX.utils.encode_cell({ r:2, c:ci }), {
+        font:      { bold:true, color:{ rgb:'FFFFFF' } },
+        fill:      { patternType:'solid', fgColor:{ rgb:'2563EB' } },
+        alignment: { horizontal:'center', vertical:'center' },
+        border: {
+          top:    { style:'thin', color:{ rgb:'1D4ED8' } },
+          bottom: { style:'medium', color:{ rgb:'1D4ED8' } },
+          left:   { style:'thin', color:{ rgb:'1D4ED8' } },
+          right:  { style:'thin', color:{ rgb:'1D4ED8' } },
+        }
+      });
+    });
+
+    // Estilo filas de datos (alternadas)
+    filas.forEach((_, ri) => {
+      const bgColor = ri % 2 === 0 ? 'F1F5F9' : 'FFFFFF';
+      encabezados.forEach((_, ci) => {
+        aplicarEstilo(XLSX.utils.encode_cell({ r: ri + 3, c: ci }), {
+          fill:      { patternType:'solid', fgColor:{ rgb: bgColor } },
+          alignment: { vertical:'center' },
+          border: {
+            bottom: { style:'thin', color:{ rgb:'E2E8F0' } },
+            right:  { style:'thin', color:{ rgb:'E2E8F0' } },
+            left:   { style:'thin', color:{ rgb:'E2E8F0' } },
+          }
+        });
+      });
+    });
+
+    // Crear libro
+    const wb       = XLSX.utils.book_new();
+    const hojaNom  = titulo.substring(0, 31) || 'Datos'; // Excel limita a 31 chars
+    XLSX.utils.book_append_sheet(wb, ws, hojaNom);
+
+    // Hoja de metadatos
+    const metaData = [
+      ['Campo',        'Valor'],
+      ['Exportado por', currentUser.nombre],
+      ['Rol',           currentUser.nombrerol],
+      ['Fecha',         new Date().toLocaleString('es-DO')],
+      ['Filtros',       titulo],
+      ['Sistema',       'InsumosPro — Gestión de Despachos'],
+    ];
+    const wsMeta = XLSX.utils.aoa_to_sheet(metaData);
+    wsMeta['!cols'] = [{ wch:18 }, { wch:50 }];
+    // Estilo encabezado de metadatos
+    ['A1','B1'].forEach(c => {
+      if (wsMeta[c]) wsMeta[c].s = {
+        font: { bold:true, color:{ rgb:'FFFFFF' } },
+        fill: { patternType:'solid', fgColor:{ rgb:'475569' } },
+      };
+    });
+    XLSX.utils.book_append_sheet(wb, wsMeta, 'Info');
+
+    const fecha    = new Date().toISOString().slice(0, 10);
+    const fileName = `${nombreArchivo}_${fecha}.xlsx`;
+
+    XLSX.writeFile(wb, fileName);
+    showToast(`✅ Excel exportado: ${fileName}`);
+
+  } catch(e) {
+    console.error('Error generando Excel:', e);
+    showToast('Error al generar el Excel: ' + e.message, 'error');
+  }
+}
+
+// ── Exportar solicitudes (con modal de filtros) ──────────────────
+async function exportarSolicitudes() {
+  // Cargar departamentos para el filtro
+  const deptos = await fetchDepartamentos();
+
+  // Calcular rango de fechas por defecto (mes actual)
+  const hoy     = new Date();
+  const primerD = new Date(hoy.getFullYear(), hoy.getMonth(), 1).toISOString().slice(0,10);
+  const hoyStr  = hoy.toISOString().slice(0,10);
+
+  const deptosOpts = deptos.map(d =>
+    `<option value="${d.iddepartamento}">${d.nombre}</option>`).join('');
+
+  // Abrir modal de filtros
+  document.getElementById('formModal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'formModal';
+  m.style.cssText = `position:fixed;inset:0;z-index:2000;background:rgba(15,23,42,.55);
+    display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .2s ease`;
+  m.innerHTML = `
+    <div style="background:white;border-radius:24px;width:100%;max-width:480px;
+      box-shadow:0 25px 50px rgba(0,0,0,.18);overflow:hidden;animation:slideUp .25s ease">
+      <div style="padding:22px 28px;border-bottom:1px solid #f1f5f9;
+        display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <h3 style="font-size:1.05rem;font-weight:700;color:#0f172a">
+            <i class="fas fa-file-excel" style="color:#16a34a;margin-right:8px"></i>
+            Exportar Solicitudes
+          </h3>
+          <p style="font-size:.78rem;color:#94a3b8;margin-top:3px">Configura los filtros del reporte</p>
+        </div>
+        <button id="closeExpModal" style="background:none;border:none;font-size:1.4rem;
+          color:#94a3b8;cursor:pointer">&times;</button>
+      </div>
+      <div style="padding:24px 28px;display:flex;flex-direction:column;gap:18px">
+
+        <div>
+          <label style="display:block;font-size:.75rem;font-weight:700;color:#475569;
+            text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">
+            Rango de Fechas
+          </label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div>
+              <label style="font-size:.78rem;color:#94a3b8;display:block;margin-bottom:4px">Desde</label>
+              <input type="date" id="exp-fecha-ini" value="${primerD}"
+                style="width:100%;padding:9px 12px;border:1.5px solid #e2e8f0;border-radius:10px;
+                font-family:inherit;font-size:.88rem;outline:none">
+            </div>
+            <div>
+              <label style="font-size:.78rem;color:#94a3b8;display:block;margin-bottom:4px">Hasta</label>
+              <input type="date" id="exp-fecha-fin" value="${hoyStr}"
+                style="width:100%;padding:9px 12px;border:1.5px solid #e2e8f0;border-radius:10px;
+                font-family:inherit;font-size:.88rem;outline:none">
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label style="display:block;font-size:.75rem;font-weight:700;color:#475569;
+            text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">
+            Departamento
+          </label>
+          <select id="exp-depto"
+            style="width:100%;padding:9px 12px;border:1.5px solid #e2e8f0;border-radius:10px;
+            font-family:inherit;font-size:.88rem;background:white;outline:none">
+            <option value="">Todos los departamentos</option>
+            ${deptosOpts}
+          </select>
+        </div>
+
+        <div>
+          <label style="display:block;font-size:.75rem;font-weight:700;color:#475569;
+            text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">
+            Estado
+          </label>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            ${['Todos','Pendiente','Aprobada','Rechazada','Despachada'].map(e => `
+              <label style="display:flex;align-items:center;gap:6px;padding:6px 12px;
+                border:1.5px solid #e2e8f0;border-radius:20px;cursor:pointer;font-size:.82rem;
+                font-weight:500;transition:.15s" class="exp-estado-lbl">
+                <input type="radio" name="exp_estado" value="${e}" ${e==='Todos'?'checked':''}
+                  style="accent-color:#3b82f6"> ${e}
+              </label>`).join('')}
+          </div>
+        </div>
+
+      </div>
+      <div style="padding:16px 28px;border-top:1px solid #f1f5f9;
+        display:flex;justify-content:flex-end;gap:10px">
+        <button id="cancelExpBtn" class="btn-secondary">Cancelar</button>
+        <button id="confirmarExpBtn" class="btn-primary" style="min-width:140px">
+          <i class="fas fa-file-excel"></i> Generar Excel
+        </button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(m);
+
+  // Highlight radio labels
+  m.querySelectorAll('.exp-estado-lbl').forEach(lbl => {
+    const inp = lbl.querySelector('input');
+    if (inp.checked) { lbl.style.borderColor='#3b82f6'; lbl.style.background='#eff6ff'; }
+    lbl.addEventListener('click', () => {
+      m.querySelectorAll('.exp-estado-lbl').forEach(l => {
+        l.style.borderColor='#e2e8f0'; l.style.background='white';
+      });
+      lbl.style.borderColor='#3b82f6'; lbl.style.background='#eff6ff';
+    });
+  });
+
+  const close = () => m.remove();
+  document.getElementById('closeExpModal').addEventListener('click', close);
+  document.getElementById('cancelExpBtn').addEventListener('click', close);
+  m.addEventListener('click', e => { if (e.target === m) close(); });
+
+  document.getElementById('confirmarExpBtn').addEventListener('click', async () => {
+    const btn     = document.getElementById('confirmarExpBtn');
+    btn.disabled  = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generando...';
+
+    const fechaIni  = document.getElementById('exp-fecha-ini').value;
+    const fechaFin  = document.getElementById('exp-fecha-fin').value;
+    const deptoId   = document.getElementById('exp-depto').value;
+    const estadoSel = m.querySelector('[name="exp_estado"]:checked')?.value ?? 'Todos';
+
+    // Validar fechas
+    if (fechaIni && fechaFin && fechaIni > fechaFin) {
+      showToast('La fecha inicial no puede ser mayor a la final', 'warning');
+      btn.disabled  = false;
+      btn.innerHTML = '<i class="fas fa-file-excel"></i> Generar Excel';
+      return;
+    }
+
+    // Construir query con filtros
+    let q = db.from('solicitudes')
+      .select('idsolicitud,prioridad,fechasolicitud,estado,comentarios,idusuario')
+      .order('fechasolicitud', { ascending: false });
+
+    if (!isAdmin()) q = q.eq('idusuario', currentUser.idusuario);
+    if (estadoSel !== 'Todos') q = q.eq('estado', estadoSel);
+    if (fechaIni) q = q.gte('fechasolicitud', `${fechaIni}T00:00:00`);
+    if (fechaFin) q = q.lte('fechasolicitud', `${fechaFin}T23:59:59`);
+
+    const { data: rawSols, error } = await q;
+    if (error || !rawSols?.length) {
+      showToast('No hay solicitudes con esos filtros', 'warning');
+      btn.disabled  = false;
+      btn.innerHTML = '<i class="fas fa-file-excel"></i> Generar Excel';
+      return;
+    }
+
+    // Fetch usuarios con departamentos
+    const userIds = [...new Set(rawSols.map(s => s.idusuario))];
+    const { data: usrs } = await db.from('usuarios')
+      .select('idusuario, nombre, iddepartamento, departamentos(nombre)')
+      .in('idusuario', userIds);
+    const usrMap = {};
+    (usrs ?? []).forEach(u => { usrMap[u.idusuario] = u; });
+
+    // Filtrar por departamento si se seleccionó uno
+    let solicitudes = rawSols.map(s => ({ ...s, usuarios: usrMap[s.idusuario] ?? null }));
+    if (deptoId) {
+      solicitudes = solicitudes.filter(s => String(s.usuarios?.iddepartamento) === String(deptoId));
+    }
+
+    if (!solicitudes.length) {
+      showToast('No hay solicitudes con esos filtros', 'warning');
+      btn.disabled  = false;
+      btn.innerHTML = '<i class="fas fa-file-excel"></i> Generar Excel';
+      return;
+    }
+
+    const depto     = deptos.find(d => String(d.iddepartamento) === String(deptoId));
+    const dNombre   = depto?.nombre ?? 'Todos';
+    const titulo    = `Solicitudes — ${dNombre} — ${fechaIni||'inicio'} al ${fechaFin||'hoy'}`;
+
+    const datos = solicitudes.map(s => ({
+      'ID':           `#${s.idsolicitud}`,
+      'Solicitante':  s.usuarios?.nombre ?? 'N/A',
+      'Departamento': s.usuarios?.departamentos?.nombre ?? 'N/A',
+      'Fecha':        new Date(s.fechasolicitud).toLocaleDateString('es-DO'),
+      'Prioridad':    s.prioridad ?? '',
+      'Estado':       s.estado ?? '',
+      'Comentarios':  s.comentarios ?? '',
+    }));
+
+    await exportarExcel(datos, 'solicitudes', titulo);
+    close();
+  });
+}
+
+// ── Exportar inventario ──────────────────────────────────────────
+async function exportarInventario() {
+  showToast('Preparando Excel...', 'warning');
+  try {
+    // fetchInventario hace .select('*') sin joins — directo y seguro
+    const { data: productos, error } = await db
+      .from('productos')
+      .select('idproducto, nombre, descripcion, stockactual, stockminimo, activo')
+      .order('nombre');
+
+    if (error) throw error;
+    if (!productos?.length) { showToast('No hay productos para exportar', 'warning'); return; }
+
+    const datos = productos.map(p => ({
+      'ID':            p.idproducto,
+      'Nombre':        p.nombre ?? '',
+      'Descripción':   p.descripcion ?? '',
+      'Stock Actual':  p.stockactual ?? 0,
+      'Stock Mínimo':  p.stockminimo ?? 0,
+      'Estado Stock':  (p.stockactual ?? 0) < (p.stockminimo ?? 0) ? 'Crítico' : 'Normal',
+      'Activo':        p.activo ? 'Sí' : 'No',
+    }));
+    await exportarExcel(datos, 'inventario', 'Reporte de Inventario de Productos');
+  } catch(e) {
+    console.error('exportarInventario:', e);
+    showToast('Error al exportar inventario: ' + e.message, 'error');
+  }
+}
+
+// ── Exportar usuarios ────────────────────────────────────────────
+async function exportarUsuarios() {
+  showToast('Preparando Excel...', 'warning');
+  try {
+    // Fetch directo sin join anidado para evitar problemas
+    const { data: usuarios, error: e1 } = await db
+      .from('usuarios')
+      .select('idusuario, nombre, correo, activo, idrol, iddepartamento')
+      .order('nombre');
+    if (e1) throw e1;
+    if (!usuarios?.length) { showToast('No hay usuarios para exportar', 'warning'); return; }
+
+    const userIds  = usuarios.map(u => u.idrol).filter(Boolean);
+    const depIds   = usuarios.map(u => u.iddepartamento).filter(Boolean);
+
+    const [{ data: roles }, { data: deptos }] = await Promise.all([
+      db.from('roles').select('idrol, nombrerol').in('idrol', [...new Set(userIds)]),
+      db.from('departamentos').select('iddepartamento, nombre').in('iddepartamento', [...new Set(depIds)]),
+    ]);
+
+    const rolMap  = {}; (roles  ?? []).forEach(r => { rolMap[r.idrol]              = r.nombrerol; });
+    const depMap  = {}; (deptos ?? []).forEach(d => { depMap[d.iddepartamento]      = d.nombre;    });
+
+    const datos = usuarios.map(u => ({
+      'ID':            u.idusuario,
+      'Nombre':        u.nombre ?? '',
+      'Correo':        u.correo ?? '',
+      'Rol':           rolMap[u.idrol]             ?? '—',
+      'Departamento':  depMap[u.iddepartamento]    ?? '—',
+      'Activo':        u.activo ? 'Sí' : 'No',
+    }));
+    await exportarExcel(datos, 'usuarios', 'Reporte de Usuarios del Sistema');
+  } catch(e) {
+    console.error('exportarUsuarios:', e);
+    showToast('Error al exportar usuarios: ' + e.message, 'error');
+  }
+}
+
+// ── Comprobante de Despacho (ventana de impresión) ───────────────
+async function imprimirComprobanteDespacho(despachoId, solicitudId) {
+  showToast('Generando comprobante...', 'warning');
+
+  // Obtener datos del despacho
+  const { data: despacho } = await db.from('despachos')
+    .select('*, usuarios(nombre, correo)')
+    .eq('iddespacho', despachoId)
+    .single();
+
+  // Obtener datos de la solicitud con detalle de productos
+  const { data: solicitud } = await db.from('solicitudes')
+    .select('*, usuarios(nombre, departamentos(nombre))')
+    .eq('idsolicitud', solicitudId)
+    .single();
+
+  const { data: detalle } = await db.from('despachodetalle')
+    .select('cantidaddespachada, productos(nombre, descripcion)')
+    .eq('iddespacho', despachoId);
+
+  // Si no hay detalle, usar el detalle de la solicitud
+  let itemsHTML = '';
+  if (detalle?.length) {
+    itemsHTML = detalle.map((d, i) => `
+      <tr style="border-bottom:1px solid #e2e8f0">
+        <td style="padding:10px 12px;color:#374151">${i+1}</td>
+        <td style="padding:10px 12px;font-weight:600">${d.productos?.nombre ?? 'Producto'}</td>
+        <td style="padding:10px 12px;color:#64748b">${d.productos?.descripcion ?? '—'}</td>
+        <td style="padding:10px 12px;text-align:center;font-weight:700;color:#0f172a">${d.cantidaddespachada}</td>
+      </tr>`).join('');
+  } else {
+    // Fallback: detalle de la solicitud original
+    const { data: solDetalle } = await db.from('solicituddetalle')
+      .select('cantidad, productos(nombre, descripcion)')
+      .eq('idsolicitud', solicitudId);
+    itemsHTML = (solDetalle ?? []).map((d, i) => `
+      <tr style="border-bottom:1px solid #e2e8f0">
+        <td style="padding:10px 12px;color:#374151">${i+1}</td>
+        <td style="padding:10px 12px;font-weight:600">${d.productos?.nombre ?? 'Producto'}</td>
+        <td style="padding:10px 12px;color:#64748b">${d.productos?.descripcion ?? '—'}</td>
+        <td style="padding:10px 12px;text-align:center;font-weight:700;color:#0f172a">${d.cantidad}</td>
+      </tr>`).join('');
+  }
+
+  const fecha        = despacho?.fechadespacho ? new Date(despacho.fechadespacho).toLocaleString('es-DO') : new Date().toLocaleString('es-DO');
+  const solicitante  = solicitud?.usuarios?.nombre ?? 'N/A';
+  const departamento = solicitud?.usuarios?.departamentos?.nombre ?? 'N/A';
+  const despachador  = despacho?.usuarios?.nombre ?? currentUser.nombre;
+
+  const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Comprobante de Despacho #${despachoId}</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; color:#0f172a; background:white; padding:32px; }
+    .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:32px; padding-bottom:24px; border-bottom:3px solid #3b82f6; }
+    .logo-area h1 { font-size:1.6rem; font-weight:800; color:#0f172a; }
+    .logo-area p  { color:#64748b; font-size:.85rem; margin-top:4px; }
+    .doc-info { text-align:right; }
+    .doc-info .doc-num { font-size:1.3rem; font-weight:700; color:#3b82f6; }
+    .doc-info .doc-fecha { font-size:.82rem; color:#64748b; margin-top:4px; }
+    .badge-completado { display:inline-block; background:#dcfce7; color:#15803d; font-size:.75rem; font-weight:700; padding:3px 10px; border-radius:20px; margin-top:6px; }
+    .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:28px; }
+    .info-box { background:#f8fafc; border-radius:12px; padding:16px 20px; border:1px solid #e2e8f0; }
+    .info-box h4 { font-size:.72rem; font-weight:700; color:#94a3b8; text-transform:uppercase; letter-spacing:.06em; margin-bottom:10px; }
+    .info-row { display:flex; justify-content:space-between; margin-bottom:6px; font-size:.88rem; }
+    .info-row .lbl { color:#64748b; }
+    .info-row .val { font-weight:600; color:#0f172a; }
+    table { width:100%; border-collapse:collapse; background:white; border-radius:12px; overflow:hidden; border:1px solid #e2e8f0; margin-bottom:28px; }
+    thead tr { background:#0f172a; }
+    thead th { padding:12px 14px; color:white; font-size:.8rem; font-weight:600; text-align:left; text-transform:uppercase; letter-spacing:.04em; }
+    tbody tr:last-child { border-bottom:none !important; }
+    .firma-grid { display:grid; grid-template-columns:1fr 1fr; gap:40px; margin-top:20px; }
+    .firma-box { text-align:center; }
+    .firma-line { border-top:2px solid #0f172a; margin-bottom:8px; }
+    .firma-label { font-size:.78rem; color:#64748b; }
+    .firma-name  { font-size:.88rem; font-weight:600; color:#0f172a; margin-top:4px; }
+    .footer { margin-top:32px; padding-top:16px; border-top:1px solid #e2e8f0; text-align:center; color:#94a3b8; font-size:.75rem; }
+    @media print {
+      body { padding:20px; }
+      .no-print { display:none !important; }
+      @page { margin:15mm; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo-area">
+      <h1>📦 InsumosPro</h1>
+      <p>Sistema de Gestión de Despachos</p>
+    </div>
+    <div class="doc-info">
+      <div class="doc-num">Despacho #${despachoId}</div>
+      <div class="doc-fecha">${fecha}</div>
+      <div class="badge-completado">✓ Completado</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="info-box">
+      <h4>Información del Solicitante</h4>
+      <div class="info-row"><span class="lbl">Nombre</span><span class="val">${solicitante}</span></div>
+      <div class="info-row"><span class="lbl">Departamento</span><span class="val">${departamento}</span></div>
+      <div class="info-row"><span class="lbl">Solicitud N°</span><span class="val">#${solicitudId}</span></div>
+    </div>
+    <div class="info-box">
+      <h4>Información del Despacho</h4>
+      <div class="info-row"><span class="lbl">Despachado por</span><span class="val">${despachador}</span></div>
+      <div class="info-row"><span class="lbl">Fecha y hora</span><span class="val">${fecha}</span></div>
+      <div class="info-row"><span class="lbl">Estado</span><span class="val" style="color:#15803d">Completado</span></div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:40px">#</th>
+        <th>Producto</th>
+        <th>Descripción</th>
+        <th style="text-align:center;width:100px">Cantidad</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${itemsHTML || '<tr><td colspan="4" style="padding:20px;text-align:center;color:#94a3b8">Sin detalle de productos</td></tr>'}
+    </tbody>
+  </table>
+
+  <div class="firma-grid">
+    <div class="firma-box">
+      <div style="height:50px"></div>
+      <div class="firma-line"></div>
+      <div class="firma-name">${solicitante}</div>
+      <div class="firma-label">Recibido por (Solicitante)</div>
+    </div>
+    <div class="firma-box">
+      <div style="height:50px"></div>
+      <div class="firma-line"></div>
+      <div class="firma-name">${despachador}</div>
+      <div class="firma-label">Despachado por (Almacén)</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    Documento generado automáticamente por InsumosPro · ${new Date().toLocaleString('es-DO')} ·
+    Usuario: ${currentUser.nombre} (${currentUser.nombrerol})
+  </div>
+
+  <div class="no-print" style="position:fixed;bottom:24px;right:24px;display:flex;gap:10px">
+    <button onclick="window.print()"
+      style="background:#3b82f6;color:white;border:none;padding:12px 24px;border-radius:12px;
+      font-size:.95rem;font-weight:600;cursor:pointer;box-shadow:0 4px 12px rgba(59,130,246,.3)">
+      🖨️ Imprimir
+    </button>
+    <button onclick="window.close()"
+      style="background:#f1f5f9;color:#475569;border:none;padding:12px 24px;border-radius:12px;
+      font-size:.95rem;font-weight:600;cursor:pointer">
+      ✕ Cerrar
+    </button>
+  </div>
+</body>
+</html>`;
+
+  const ventana = window.open('', '_blank', 'width=900,height=700');
+  ventana.document.write(html);
+  ventana.document.close();
+}
+
+// ── Comprobante rápido (post-despacho, sin idDespacho aún) ───────
+async function imprimirComprobanteSolicitud(solicitudId) {
+  // Buscar el despacho más reciente para esta solicitud
+  const { data: despachos } = await db.from('despachos')
+    .select('iddespacho')
+    .eq('idsolicitud', solicitudId)
+    .order('fechadespacho', { ascending: false })
+    .limit(1);
+
+  const did = despachos?.[0]?.iddespacho;
+  if (did) {
+    await imprimirComprobanteDespacho(did, solicitudId);
+  } else {
+    // Fallback sin ID de despacho formal
+    await imprimirComprobanteDespacho(null, solicitudId);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════
